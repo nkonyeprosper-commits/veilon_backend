@@ -10,7 +10,7 @@ import * as path from 'path';
  */
 
 export interface ProofInputs {
-  amount: string;
+  amount?: string;  // For shield operations (now optional)
   secret?: string;
   nullifier?: string;
   randomness?: string;
@@ -162,27 +162,51 @@ export class ProofGeneratorService {
   }
 
   /**
-   * Generate unshield proof
-   * Proves user owns a commitment and can withdraw funds
+   * Generate unshield proof (supports partial amounts with change)
+   * Proves user owns a commitment and can withdraw partial/full funds
    */
-  async generateUnshieldProof(inputs: ProofInputs): Promise<ProofResult> {
+  async generateUnshieldProof(inputs: ProofInputs & {
+    inputAmount?: string;
+    outputAmount?: string;
+    changeAmount?: string;
+    inputCommitment?: string;
+    changeSecret?: string;
+    changeNullifier?: string;
+    changeRandomness?: string;
+  }): Promise<ProofResult & {
+    changeCommitment: string;
+    changeSecret: string;
+    changeNullifier: string;
+    changeRandomness: string;
+  }> {
     try {
-      console.log('🔓 Generating unshield proof...');
+      console.log('🔓 Generating unshield proof with change support...');
 
       if (!inputs.secret || !inputs.nullifier || !inputs.randomness) {
         throw new Error('Secret, nullifier, and randomness required for unshield');
       }
 
-      // Recalculate commitment to verify
-      const commitment = this.generateCommitment(
+      // Recalculate input commitment to verify
+      const inputCommitment = this.generateCommitment(
         inputs.secret,
         inputs.nullifier,
         inputs.randomness
       );
       const nullifierHash = this.generateNullifierHash(inputs.nullifier, inputs.randomness);
 
-      console.log('  Commitment:', commitment.substring(0, 10) + '...');
+      // Generate change commitment secrets if not provided
+      const changeSecret = inputs.changeSecret || this.randomFieldElement();
+      const changeNullifier = inputs.changeNullifier || this.randomFieldElement();
+      const changeRandomness = inputs.changeRandomness || this.randomFieldElement();
+
+      // Calculate change commitment
+      const changeCommitment = this.generateCommitment(changeSecret, changeNullifier, changeRandomness);
+
+      console.log('  Input Commitment:', inputCommitment.substring(0, 10) + '...');
       console.log('  Nullifier Hash:', nullifierHash.substring(0, 10) + '...');
+      console.log('  Change Commitment:', changeCommitment.substring(0, 10) + '...');
+      console.log('  Output Amount:', inputs.outputAmount);
+      console.log('  Change Amount:', inputs.changeAmount);
 
       // Check if compiled circuit files exist
       const wasmPath = path.join(this.circuitsPath, 'artifacts/unshield_js/unshield.wasm');
@@ -191,31 +215,54 @@ export class ProofGeneratorService {
       if (!fs.existsSync(wasmPath) || !fs.existsSync(zkeyPath)) {
         console.log('⚠️  Compiled circuits not found. Using mock proof for development.');
 
+        // Public signals: [outputAmount, changeAmount, recipient, nullifierHash, inputCommitment, outputAmountOut, changeCommitment, changeAmountOut, recipientOut]
+        // Order: public inputs first, then public outputs
         return {
           proof: this.generateMockProof(),
-          publicSignals: [nullifierHash, inputs.amount || '0', inputs.recipient || '0'],
-          commitment,
+          publicSignals: [
+            inputs.outputAmount || '0',      // public input
+            inputs.changeAmount || '0',      // public input
+            inputs.recipient || '0',         // public input
+            nullifierHash,                   // public output
+            inputCommitment,                 // public output
+            inputs.outputAmount || '0',      // public output (outputAmountOut)
+            changeCommitment,                // public output
+            inputs.changeAmount || '0',      // public output (changeAmountOut)
+            inputs.recipient || '0'          // public output (recipientOut)
+          ],
+          commitment: inputCommitment,
           nullifier: inputs.nullifier,
           secret: inputs.secret,
           randomness: inputs.randomness,
-          nullifierHash
+          nullifierHash,
+          changeCommitment,
+          changeSecret,
+          changeNullifier,
+          changeRandomness
         };
       }
 
       // Prepare circuit inputs
-      // Public inputs: recipient, amount, commitment
-      // Private inputs: secret, randomness, nullifier
       const circuitInputs = {
         // Private inputs (witness)
         secret: inputs.secret,
         randomness: inputs.randomness,
         nullifier: inputs.nullifier,
+        changeSecret,
+        changeNullifier,
+        changeRandomness,
         // Public inputs
-        recipient: inputs.recipient || '0',
-        amount: inputs.amount || '0',
-        commitment: inputs.commitment || commitment
+        outputAmount: inputs.outputAmount || '0',
+        changeAmount: inputs.changeAmount || '0',
+        recipient: inputs.recipient || '0'
       };
 
+      console.log('  Circuit inputs debug:');
+      console.log('    secret type:', typeof inputs.secret, 'value:', inputs.secret?.substring(0, 20));
+      console.log('    changeSecret type:', typeof changeSecret, 'value:', changeSecret?.substring(0, 20));
+      console.log('    changeNullifier type:', typeof changeNullifier, 'value:', changeNullifier?.substring(0, 20));
+      console.log('    changeRandomness type:', typeof changeRandomness, 'value:', changeRandomness?.substring(0, 20));
+      console.log('    Full circuitInputs:', JSON.stringify(circuitInputs, null, 2));
       console.log('  Generating ZK proof with snarkjs...');
 
       // Generate the proof
@@ -230,11 +277,15 @@ export class ProofGeneratorService {
       return {
         proof,
         publicSignals,
-        commitment,
+        commitment: inputCommitment,
         nullifier: inputs.nullifier,
         secret: inputs.secret,
         randomness: inputs.randomness,
-        nullifierHash
+        nullifierHash,
+        changeCommitment,
+        changeSecret,
+        changeNullifier,
+        changeRandomness
       };
 
     } catch (error: any) {
@@ -278,21 +329,55 @@ export class ProofGeneratorService {
   }
 
   /**
-   * Generate transfer proof
-   * Proves user owns input commitment and creates new output commitment
+   * Generate transfer proof (supports partial amounts with change)
+   * Proves user owns input commitment and creates output + change commitments
    */
   async generateTransferProof(inputs: ProofInputs & {
     inputCommitment?: string;
-    outputCommitment?: string;
+    inputAmount?: string;
+    outputAmount?: string;
+    changeAmount?: string;
     inputSecret?: string;
     inputNullifier?: string;
     inputRandomness?: string;
     outputSecret?: string;
     outputNullifier?: string;
     outputRandomness?: string;
-  }): Promise<ProofResult> {
+    changeSecret?: string;
+    changeNullifier?: string;
+    changeRandomness?: string;
+  }): Promise<ProofResult & {
+    changeCommitment: string;
+    changeSecret: string;
+    changeNullifier: string;
+    changeRandomness: string;
+  }> {
     try {
-      console.log('🔄 Generating transfer proof...');
+      console.log('🔄 Generating transfer proof with change support...');
+
+      // Generate change commitment secrets if not provided
+      const changeSecret = inputs.changeSecret || this.randomFieldElement();
+      const changeNullifier = inputs.changeNullifier || this.randomFieldElement();
+      const changeRandomness = inputs.changeRandomness || this.randomFieldElement();
+
+      // Calculate output commitment from output secrets
+      const calculatedOutputCommitment = this.hash(
+        inputs.outputSecret!,
+        inputs.outputNullifier!,
+        inputs.outputRandomness!
+      );
+
+      // Calculate change commitment
+      const changeCommitment = this.hash(changeSecret, changeNullifier, changeRandomness);
+
+      // Calculate nullifier hash
+      const nullifierHash = this.hash(inputs.inputNullifier!, inputs.inputRandomness!);
+
+      console.log('  Input Commitment:', inputs.inputCommitment?.substring(0, 10) + '...');
+      console.log('  Output Commitment:', calculatedOutputCommitment.substring(0, 10) + '...');
+      console.log('  Change Commitment:', changeCommitment.substring(0, 10) + '...');
+      console.log('  Output Amount:', inputs.outputAmount);
+      console.log('  Change Amount:', inputs.changeAmount);
 
       // Check if compiled circuit files exist
       const wasmPath = path.join(this.circuitsPath, 'artifacts/transfer_js/transfer.wasm');
@@ -308,24 +393,30 @@ export class ProofGeneratorService {
       if (!fs.existsSync(wasmPath) || !fs.existsSync(zkeyPath)) {
         console.log('⚠️  Compiled circuits not found. Using mock proof for development.');
 
-        const nullifierHash = this.hash(inputs.inputNullifier!, inputs.inputRandomness!);
-
+        // Public signals: [outputAmount, changeAmount, recipient, nullifierHash, inputCommitment, outputCommitment, outputAmountOut, changeCommitment, changeAmountOut, recipientOut]
+        // Order: public inputs first, then public outputs
         return {
           proof: this.generateMockProof(),
-          publicSignals: [inputs.inputCommitment!, inputs.outputCommitment!, inputs.amount || '0', inputs.recipient || '0'],
+          publicSignals: [
+            inputs.outputAmount || '0',       // public input
+            inputs.changeAmount || '0',       // public input
+            inputs.recipient || '0',          // public input
+            nullifierHash,                    // public output
+            inputs.inputCommitment!,          // public output
+            calculatedOutputCommitment,       // public output
+            inputs.outputAmount || '0',       // public output (outputAmountOut)
+            changeCommitment,                 // public output
+            inputs.changeAmount || '0',       // public output (changeAmountOut)
+            inputs.recipient || '0'           // public output (recipientOut)
+          ],
           nullifierHash,
-          outputCommitment: inputs.outputCommitment
+          outputCommitment: calculatedOutputCommitment,
+          changeCommitment,
+          changeSecret,
+          changeNullifier,
+          changeRandomness
         };
       }
-
-      // Calculate output commitment from output secrets
-      const calculatedOutputCommitment = this.hash(
-        inputs.outputSecret!,
-        inputs.outputNullifier!,
-        inputs.outputRandomness!
-      );
-
-      console.log('  Calculated output commitment:', calculatedOutputCommitment);
 
       // Prepare circuit inputs
       const circuitInputs = {
@@ -336,10 +427,12 @@ export class ProofGeneratorService {
         outputSecret: inputs.outputSecret!,
         outputNullifier: inputs.outputNullifier!,
         outputRandomness: inputs.outputRandomness!,
+        changeSecret,
+        changeNullifier,
+        changeRandomness,
         // Public inputs
-        inputCommitment: inputs.inputCommitment!,
-        outputCommitment: calculatedOutputCommitment, // Use calculated commitment
-        amount: inputs.amount || '0',
+        outputAmount: inputs.outputAmount || '0',
+        changeAmount: inputs.changeAmount || '0',
         recipient: inputs.recipient || '0'
       };
 
@@ -357,8 +450,10 @@ export class ProofGeneratorService {
       console.log('  [0] nullifierHash:', publicSignals[0]);
       console.log('  [1] inputCommitment:', publicSignals[1]);
       console.log('  [2] outputCommitment:', publicSignals[2]);
-      console.log('  [3] amount:', publicSignals[3]);
-      console.log('  [4] recipient:', publicSignals[4]);
+      console.log('  [3] outputAmount:', publicSignals[3]);
+      console.log('  [4] changeCommitment:', publicSignals[4]);
+      console.log('  [5] changeAmount:', publicSignals[5]);
+      console.log('  [6] recipient:', publicSignals[6]);
       console.log('  Total signals:', publicSignals.length);
 
       // Verify proof locally before returning
@@ -373,8 +468,12 @@ export class ProofGeneratorService {
       return {
         proof,
         publicSignals,
-        nullifierHash: publicSignals[0], // First output is nullifierHash
-        outputCommitment: calculatedOutputCommitment // Return the calculated commitment
+        nullifierHash: publicSignals[0],
+        outputCommitment: calculatedOutputCommitment,
+        changeCommitment,
+        changeSecret,
+        changeNullifier,
+        changeRandomness
       };
 
     } catch (error: any) {
