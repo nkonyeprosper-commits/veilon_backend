@@ -10,10 +10,12 @@ const router = Router();
  */
 router.post('/shield', async (req: Request, res: Response) => {
   try {
-    const { amount, recipient, chainId, network } = req.body;
+    const { amount, recipient, chainId, network, token, tokenAddress } = req.body;
 
     console.log('📥 Received shield request:');
     console.log('  Amount:', amount);
+    console.log('  Token:', token || 'ETH');
+    console.log('  Token Address:', tokenAddress || 'N/A');
     console.log('  Recipient:', recipient);
     console.log('  Chain:', chainId || network || 'default');
 
@@ -25,10 +27,49 @@ router.post('/shield', async (req: Request, res: Response) => {
       });
     }
 
+    // Convert amount to Wei based on token decimals
+    let amountWei: string;
+
+    if (token && token !== 'ETH' && tokenAddress) {
+      // ERC20 token - query contract for decimals
+      console.log('🔍 Querying ERC20 token decimals...');
+      try {
+        const provider = new ethers.JsonRpcProvider(
+          process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com'
+        );
+
+        const ERC20_ABI = [
+          'function decimals() view returns (uint8)'
+        ];
+
+        const tokenContract = new ethers.Contract(
+          tokenAddress,
+          ERC20_ABI,
+          provider
+        );
+
+        const decimals = await tokenContract.decimals();
+        console.log(`  Token decimals: ${decimals}`);
+
+        amountWei = ethers.parseUnits(amount, decimals).toString();
+        console.log(`  Amount converted: ${amount} ${token} = ${amountWei} (${decimals} decimals)`);
+      } catch (error: any) {
+        console.error('❌ Failed to query token decimals:', error.message);
+        return res.status(400).json({
+          success: false,
+          error: `Failed to query token decimals: ${error.message}`
+        });
+      }
+    } else {
+      // Native ETH - use 18 decimals
+      amountWei = ethers.parseEther(amount).toString();
+      console.log(`  Amount converted: ${amount} ETH = ${amountWei} Wei`);
+    }
+
     // Generate proof
     console.log('🔐 Generating shield proof...');
     const proofResult = await proofGenerator.generateShieldProof({
-      amount: ethers.parseEther(amount).toString(),
+      amount: amountWei,
       recipient: recipient || '0x0000000000000000000000000000000000000000'
     });
 
@@ -77,14 +118,17 @@ router.post('/unshield', async (req: Request, res: Response) => {
       changeNullifier,
       changeRandomness,
       chainId,
-      network
+      network,
+      token,
+      tokenAddress
     } = req.body;
 
     console.log('📥 Received unshield request:');
     console.log('  Input Amount:', inputAmount);
-    console.log('  Input Amount (raw):', inputAmount);
-    console.log('  Output Amount (raw):', outputAmount);
-    console.log('  Change Amount (raw):', changeAmount);
+    console.log('  Output Amount:', outputAmount);
+    console.log('  Change Amount:', changeAmount);
+    console.log('  Token:', token || 'ETH');
+    console.log('  Token Address:', tokenAddress || 'N/A');
     console.log('  Recipient:', recipient);
     console.log('  Chain:', chainId || network || 'default');
 
@@ -108,14 +152,6 @@ router.post('/unshield', async (req: Request, res: Response) => {
       ? changeAmount
       : (parseFloat(inputAmount) - parseFloat(outputAmount)).toString();
 
-    console.log('💰 Amount calculations:');
-    console.log('  Input (ether):', inputAmount);
-    console.log('  Output (ether):', outputAmount);
-    console.log('  Calculated Change (ether):', calculatedChange);
-    console.log('  Input (wei):', ethers.parseEther(inputAmount).toString());
-    console.log('  Output (wei):', ethers.parseEther(outputAmount).toString());
-    console.log('  Change (wei):', ethers.parseEther(calculatedChange).toString());
-
     if (parseFloat(calculatedChange) < 0) {
       return res.status(400).json({
         success: false,
@@ -130,12 +166,65 @@ router.post('/unshield', async (req: Request, res: Response) => {
       });
     }
 
+    // Convert amounts to Wei based on token decimals
+    let inputAmountWei: string;
+    let outputAmountWei: string;
+    let changeAmountWei: string;
+
+    if (token && token !== 'ETH' && tokenAddress) {
+      // ERC20 token - query contract for decimals
+      console.log('🔍 Querying ERC20 token decimals...');
+      try {
+        const provider = new ethers.JsonRpcProvider(
+          process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com'
+        );
+
+        const ERC20_ABI = [
+          'function decimals() view returns (uint8)'
+        ];
+
+        const tokenContract = new ethers.Contract(
+          tokenAddress,
+          ERC20_ABI,
+          provider
+        );
+
+        const decimals = await tokenContract.decimals();
+        console.log(`  Token decimals: ${decimals}`);
+
+        inputAmountWei = ethers.parseUnits(inputAmount, decimals).toString();
+        outputAmountWei = ethers.parseUnits(outputAmount, decimals).toString();
+        changeAmountWei = ethers.parseUnits(calculatedChange, decimals).toString();
+
+        console.log('💰 Amount calculations:');
+        console.log(`  Input: ${inputAmount} ${token} = ${inputAmountWei}`);
+        console.log(`  Output: ${outputAmount} ${token} = ${outputAmountWei}`);
+        console.log(`  Change: ${calculatedChange} ${token} = ${changeAmountWei}`);
+      } catch (error: any) {
+        console.error('❌ Failed to query token decimals:', error.message);
+        return res.status(400).json({
+          success: false,
+          error: `Failed to query token decimals: ${error.message}`
+        });
+      }
+    } else {
+      // Native ETH - use 18 decimals
+      inputAmountWei = ethers.parseEther(inputAmount).toString();
+      outputAmountWei = ethers.parseEther(outputAmount).toString();
+      changeAmountWei = ethers.parseEther(calculatedChange).toString();
+
+      console.log('💰 Amount calculations:');
+      console.log(`  Input: ${inputAmount} ETH = ${inputAmountWei} Wei`);
+      console.log(`  Output: ${outputAmount} ETH = ${outputAmountWei} Wei`);
+      console.log(`  Change: ${calculatedChange} ETH = ${changeAmountWei} Wei`);
+    }
+
     // Generate proof
     console.log('🔐 Generating unshield proof with change support...');
     const proofResult = await proofGenerator.generateUnshieldProof({
-      inputAmount: ethers.parseEther(inputAmount).toString(),
-      outputAmount: ethers.parseEther(outputAmount).toString(),
-      changeAmount: ethers.parseEther(calculatedChange).toString(),
+      inputAmount: inputAmountWei,
+      outputAmount: outputAmountWei,
+      changeAmount: changeAmountWei,
       recipient,
       secret,
       nullifier,
@@ -195,13 +284,17 @@ router.post('/transfer', async (req: Request, res: Response) => {
       changeNullifier,
       changeRandomness,
       chainId,
-      network
+      network,
+      token,
+      tokenAddress
     } = req.body;
 
     console.log('📥 Received transfer request:');
     console.log('  Input Amount:', inputAmount);
     console.log('  Output Amount:', outputAmount);
     console.log('  Change Amount:', changeAmount);
+    console.log('  Token:', token || 'ETH');
+    console.log('  Token Address:', tokenAddress || 'N/A');
     console.log('  Recipient:', recipient);
 
     // Validate inputs
@@ -245,13 +338,66 @@ router.post('/transfer', async (req: Request, res: Response) => {
       });
     }
 
+    // Convert amounts to Wei based on token decimals
+    let inputAmountWei: string;
+    let outputAmountWei: string;
+    let changeAmountWei: string;
+
+    if (token && token !== 'ETH' && tokenAddress) {
+      // ERC20 token - query contract for decimals
+      console.log('🔍 Querying ERC20 token decimals...');
+      try {
+        const provider = new ethers.JsonRpcProvider(
+          process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com'
+        );
+
+        const ERC20_ABI = [
+          'function decimals() view returns (uint8)'
+        ];
+
+        const tokenContract = new ethers.Contract(
+          tokenAddress,
+          ERC20_ABI,
+          provider
+        );
+
+        const decimals = await tokenContract.decimals();
+        console.log(`  Token decimals: ${decimals}`);
+
+        inputAmountWei = ethers.parseUnits(inputAmount, decimals).toString();
+        outputAmountWei = ethers.parseUnits(outputAmount, decimals).toString();
+        changeAmountWei = ethers.parseUnits(calculatedChange, decimals).toString();
+
+        console.log('💰 Amount calculations:');
+        console.log(`  Input: ${inputAmount} ${token} = ${inputAmountWei}`);
+        console.log(`  Output: ${outputAmount} ${token} = ${outputAmountWei}`);
+        console.log(`  Change: ${calculatedChange} ${token} = ${changeAmountWei}`);
+      } catch (error: any) {
+        console.error('❌ Failed to query token decimals:', error.message);
+        return res.status(400).json({
+          success: false,
+          error: `Failed to query token decimals: ${error.message}`
+        });
+      }
+    } else {
+      // Native ETH - use 18 decimals
+      inputAmountWei = ethers.parseEther(inputAmount).toString();
+      outputAmountWei = ethers.parseEther(outputAmount).toString();
+      changeAmountWei = ethers.parseEther(calculatedChange).toString();
+
+      console.log('💰 Amount calculations:');
+      console.log(`  Input: ${inputAmount} ETH = ${inputAmountWei} Wei`);
+      console.log(`  Output: ${outputAmount} ETH = ${outputAmountWei} Wei`);
+      console.log(`  Change: ${calculatedChange} ETH = ${changeAmountWei} Wei`);
+    }
+
     // Generate proof
     console.log('🔐 Generating transfer proof with change support...');
     const proofResult = await proofGenerator.generateTransferProof({
       inputCommitment,
-      inputAmount: ethers.parseEther(inputAmount).toString(),
-      outputAmount: ethers.parseEther(outputAmount).toString(),
-      changeAmount: ethers.parseEther(calculatedChange).toString(),
+      inputAmount: inputAmountWei,
+      outputAmount: outputAmountWei,
+      changeAmount: changeAmountWei,
       recipient,
       inputSecret,
       inputNullifier,
